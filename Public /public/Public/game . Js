@@ -1,0 +1,196 @@
+// client-side expanded game.js (connects to socket.io, handles UI + moves)
+const socket = io();
+
+let board = null;
+let turn = null;
+let myColor = null;
+let roomId = null;
+let username = null;
+let selected = null;
+
+const boardEl = document.getElementById('board');
+const turnLabel = document.getElementById('turnLabel');
+const statusEl = document.getElementById('status');
+const chatLog = document.getElementById('chatLog');
+const chatInput = document.getElementById('chatInput');
+const chatSend = document.getElementById('chatSend');
+const moveLogEl = document.getElementById('moveLog');
+const roomListEl = document.getElementById('roomList');
+
+function renderBoard(){
+  boardEl.innerHTML='';
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const cell = document.createElement('div');
+      cell.className = 'cell ' + (((r+c)%2===1)?'dark':'light');
+      cell.dataset.r = r; cell.dataset.c = c;
+      if((r+c)%2===1) cell.addEventListener('click', onCellClick);
+      const piece = board ? board[r][c] : null;
+      if(piece){
+        const p = document.createElement('div');
+        p.className = 'piece ' + (piece.toLowerCase()==='b'?'black':'white');
+        if(piece === piece.toUpperCase()) p.classList.add('king');
+        p.textContent = piece.toUpperCase();
+        cell.appendChild(p);
+      }
+      if(selected && selected[0]===r && selected[1]===c) cell.classList.add('selected');
+      boardEl.appendChild(cell);
+    }
+  }
+  turnLabel.textContent = turn ? (turn==='b'?'Black':'White') : '—';
+}
+
+function appendChat(msg){
+  const d = document.createElement('div');
+  d.textContent = `[${new Date(msg.ts).toLocaleTimeString()}] ${msg.from}: ${msg.text}`;
+  chatLog.appendChild(d);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+function appendMove(text){
+  const d = document.createElement('div');
+  d.textContent = text;
+  moveLogEl.appendChild(d);
+  moveLogEl.scrollTop = moveLogEl.scrollHeight;
+}
+
+// lobby UI
+document.getElementById('btnCreate').addEventListener('click', ()=>{
+  username = document.getElementById('username').value.trim() || 'Player';
+  socket.emit('createRoom', { username }, (res)=>{
+    if(res.ok){
+      roomId = res.roomId; myColor = res.color;
+      document.getElementById('roomLabel').textContent = roomId;
+      document.getElementById('playersLabel').textContent = '1';
+      statusEl.textContent = `Created room ${roomId}. Waiting for opponent... You are ${myColor==='b'?'Black':'White'}`;
+      clearLogs();
+    } else alert(res.error || 'Create failed');
+  });
+});
+
+document.getElementById('btnJoin').addEventListener('click', ()=>{
+  username = document.getElementById('username').value.trim() || 'Player';
+  const rid = document.getElementById('roomId').value.trim().toUpperCase();
+  if(!rid){ alert('Enter room code'); return; }
+  socket.emit('joinRoom', { roomId: rid, username }, (res)=>{
+    if(res.ok){
+      roomId = res.roomId; myColor = res.color;
+      document.getElementById('roomLabel').textContent = roomId;
+      document.getElementById('playersLabel').textContent = '2';
+      statusEl.textContent = `Joined room ${roomId}. You are ${myColor==='b'?'Black':'White'}`;
+      clearLogs();
+    } else alert(res.error || 'Join failed');
+  });
+});
+
+document.getElementById('btnLeave').addEventListener('click', ()=>{
+  if(roomId) socket.emit('leaveRoom', { roomId });
+  location.reload();
+});
+
+document.getElementById('btnResetLocal').addEventListener('click', ()=>{
+  board = null; renderBoard(); document.getElementById('roomLabel').textContent='—'; document.getElementById('playersLabel').textContent='0'; statusEl.textContent='Not in a game';
+});
+
+// chat
+chatSend.addEventListener('click', ()=> {
+  const text = chatInput.value.trim();
+  if(!text) return;
+  socket.emit('sendChat', { roomId, text }, (res)=>{
+    if(res.ok){ chatInput.value=''; }
+    else alert(res.error || 'Chat failed');
+  });
+});
+
+// simple client-side move generator (for UI hints). It mirrors server logic
+const BOARD_SIZE = 8;
+function inBounds(r,c){ return r>=0 && r<BOARD_SIZE && c>=0 && c<BOARD_SIZE; }
+function isOpponent(piece, player){ if(!piece) return false; if(player==='w') return piece.toLowerCase()==='b'; if(player==='b') return piece.toLowerCase()==='w'; return false; }
+function isPlayerPiece(piece, player){ if(!piece) return false; return piece.toLowerCase()===player; }
+function getDirections(piece){ if(!piece) return []; if(piece==='b') return [[1,-1],[1,1]]; if(piece==='w') return [[-1,-1],[-1,1]]; return [[1,-1],[1,1],[-1,-1],[-1,1]]; }
+function shouldPromote(piece,row){ if(!piece) return false; if(piece==='w' && row===0) return true; if(piece==='b' && row===BOARD_SIZE-1) return true; return false; }
+function cloneBoard(b){ return b.map(r=>r.slice()); }
+function getSimpleMovesFrom(board,r,c,piece){ const res=[]; const dirs=getDirections(piece); for(const [dr,dc] of dirs){ const nr=r+dr, nc=c+dc; if(inBounds(nr,nc) && board[nr][nc]===null){ res.push({from:[r,c],to:[nr,nc],captures:[],isJump:false,promote:shouldPromote(piece,nr)}); } } return res; }
+function getJumpsFrom(board,r,c,piece){ const results=[]; function recurse(currBoard, cr, cc, capturedSoFar, pathFrom){ let foundAny=false; const dirs=getDirections(piece); for(const [dr,dc] of dirs){ const mr=cr+dr, mc=cc+dc; const lr=cr+2*dr, lc=cc+2*dc; if(!inBounds(mr,mc)||!inBounds(lr,lc)) continue; const midPiece = currBoard[mr][mc]; if(!isOpponent(midPiece, piece.toLowerCase())) continue; if(currBoard[lr][lc]!==null) continue; const nb=cloneBoard(currBoard); nb[cr][cc]=null; nb[mr][mc]=null; nb[lr][lc]=piece; const newCaptured = capturedSoFar.concat([[mr,mc]]); const further = recurse(nb, lr, lc, newCaptured, pathFrom.concat([[lr,lc]])); if(!further.found){ results.push({from:pathFrom[0], to:[lr,lc], captures:newCaptured, isJump:true, promote:shouldPromote(piece, lr)}); } foundAny=true; } return {found:foundAny}; } recurse(board, r, c, [], [[r,c]]); return results; }
+function getAllLegalMoves(board, player){ const moves=[]; const jumpMoves=[]; for(let r=0;r<BOARD_SIZE;r++){ for(let c=0;c<BOARD_SIZE;c++){ const piece=board[r][c]; if(!isPlayerPiece(piece, player)) continue; const pj=getJumpsFrom(board,r,c,piece); if(pj.length) jumpMoves.push(...pj); else { const ps=getSimpleMovesFrom(board,r,c,piece); moves.push(...ps); } } } return jumpMoves.length ? jumpMoves : moves; }
+
+function onCellClick(e){
+  if(!board) return;
+  const r=parseInt(e.currentTarget.dataset.r,10);
+  const c=parseInt(e.currentTarget.dataset.c,10);
+  const piece = board[r][c];
+  if(isPlayerPiece(piece, myColor)){
+    selected = [r,c];
+    renderBoard();
+    highlightDestinations();
+    statusEl.textContent = 'Selected piece';
+    return;
+  }
+  if(selected){
+    const allMoves = getAllLegalMoves(board, myColor);
+    const move = allMoves.find(m => m.from[0]===selected[0] && m.from[1]===selected[1] && m.to[0]===r && m.to[1]===c);
+    if(!move){ statusEl.textContent = 'Invalid move'; selected=null; renderBoard(); return; }
+    socket.emit('makeMove', { roomId, move }, (res)=>{
+      if(res.ok){ appendMove(`${username} moved`); selected=null; }
+      else alert(res.error || 'Move rejected');
+    });
+  }
+}
+
+function highlightDestinations(){
+  const cells = boardEl.querySelectorAll('.cell');
+  cells.forEach(cell=> cell.style.boxShadow='');
+  const moves = getAllLegalMoves(board, myColor);
+  moves.forEach(m=>{
+    const idx = coordToIndex(m.to[0], m.to[1]);
+    const cell = cells[idx];
+    if(cell) cell.style.boxShadow = 'inset 0 0 0 4px rgba(0,0,255,0.2)';
+  });
+}
+
+function coordToIndex(r,c){ return r*8+c; }
+
+socket.on('lobbyUpdate', data => {
+  roomListEl.innerHTML = '';
+  data.rooms.forEach(r=>{
+    const li = document.createElement('li');
+    li.textContent = `${r.id} — players: ${r.players}`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Join';
+    btn.style.marginLeft='8px';
+    btn.addEventListener('click', ()=> { document.getElementById('roomId').value = r.id; });
+    li.appendChild(btn);
+    roomListEl.appendChild(li);
+  });
+});
+
+socket.on('roomUpdate', room => {
+  document.getElementById('playersLabel').textContent = room.players.length;
+});
+
+socket.on('gameStart', data => {
+  board = data.board; turn = data.turn;
+  renderBoard(); statusEl.textContent = 'Game started';
+  appendMove('Game started');
+});
+
+socket.on('moveMade', data => {
+  board = data.board; turn = data.turn;
+  renderBoard();
+  appendMove(`${data.move.isJump ? 'Jump' : 'Step'} performed`);
+});
+
+socket.on('gameOver', ({winner, room})=>{
+  renderBoard();
+  statusEl.textContent = `Game over. Winner: ${winner==='b'?'Black':'White'}`;
+  appendMove(`Game over. Winner: ${winner==='b'?'Black':'White'}`);
+});
+
+socket.on('chat', msg => {
+  appendChat(msg);
+});
+
+window.addEventListener('beforeunload', ()=> {
+  if(roomId) socket.emit('leaveRoom', { roomId });
+});
+
+function clearLogs(){ chatLog.innerHTML=''; moveLogEl.innerHTML=''; }
