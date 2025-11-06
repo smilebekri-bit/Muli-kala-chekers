@@ -1,0 +1,20 @@
+body { font-family: Arial, sans-serif; margin:0; padding:12px; background:#f4f4f8; color:#222; }
+#header { display:flex; gap:20px; align-items:flex-start; }
+#lobbyPanel { width:360px; padding:8px; background:#fff; border:1px solid #ddd; border-radius:6px; }
+#roomList { list-style:none; padding-left:6px; max-height:200px; overflow:auto; }
+#main { display:flex; gap:20px; margin-top:12px; }
+#board { display:grid; grid-template-columns: repeat(8,56px); grid-template-rows: repeat(8,56px); border:4px solid #333; }
+.cell { width:56px; height:56px; box-sizing:border-box; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+.dark { background:#769656; }
+.light { background:#eeeed2; }
+.piece { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:bold; color:white; user-select:none; }
+.black { background:#222; }
+.white { background:#eee; color:#222; border:2px solid #ccc; }
+.king { box-shadow: inset 0 0 0 3px rgba(255,215,0,0.9); }
+.selected { outline: 4px solid rgba(255,255,0,0.6); }
+#side { width:360px; padding:8px; background:#fff; border:1px solid #ddd; border-radius:6px; }
+#chatBox { border:1px solid #ddd; padding:6px; background:#fafafa; margin-top:10px; }
+#chatLog { height:200px; overflow:auto; background:#fff; padding:6px; border:1px solid #eee; }
+#moveLog { height:200px; overflow:auto; background:#fff; padding:6px; border:1px solid #eee; }
+input { padding:6px; width:100%; box-sizing:border-box; margin-bottom:6px; }
+button { padding:6px 10px; margin-top:6px; }
