@@ -1,0 +1,256 @@
+// server.js - authoritative Node + Express + Socket.IO checkers server
+const express = require('express');
+const http = require('http');
+const path = require('path');
+const { Server } = require('socket.io');
+
+const BOARD_SIZE = 8;
+
+function cloneBoard(board){ return board.map(r=>r.slice()); }
+function initBoard(){
+  const board = Array.from({length: BOARD_SIZE}, ()=>Array(BOARD_SIZE).fill(null));
+  for(let r=0;r<3;r++){
+    for(let c=0;c<BOARD_SIZE;c++){
+      if((r+c)%2===1) board[r][c] = 'b';
+    }
+  }
+  for(let r=5;r<8;r++){
+    for(let c=0;c<BOARD_SIZE;c++){
+      if((r+c)%2===1) board[r][c] = 'w';
+    }
+  }
+  return board;
+}
+function inBounds(r,c){ return r>=0 && r<BOARD_SIZE && c>=0 && c<BOARD_SIZE; }
+function isOpponent(piece, player){
+  if(!piece) return false;
+  if(player==='w') return piece.toLowerCase()==='b';
+  if(player==='b') return piece.toLowerCase()==='w';
+  return false;
+}
+function isPlayerPiece(piece, player){
+  if(!piece) return false;
+  return piece.toLowerCase()===player;
+}
+function getDirections(piece){
+  if(!piece) return [];
+  if(piece==='b') return [[1,-1],[1,1]];
+  if(piece==='w') return [[-1,-1],[-1,1]];
+  return [[1,-1],[1,1],[-1,-1],[-1,1]];
+}
+function shouldPromote(piece,row){
+  if(!piece) return false;
+  if(piece==='w' && row===0) return true;
+  if(piece==='b' && row===BOARD_SIZE-1) return true;
+  return false;
+}
+function getSimpleMovesFrom(board,r,c,piece){
+  const res=[];
+  const dirs = getDirections(piece);
+  for(const [dr,dc] of dirs){
+    const nr=r+dr, nc=c+dc;
+    if(inBounds(nr,nc) && board[nr][nc]===null){
+      const promote = shouldPromote(piece,nr);
+      res.push({from:[r,c],to:[nr,nc],captures:[],isJump:false,promote});
+    }
+  }
+  return res;
+}
+function getJumpsFrom(board,r,c,piece){
+  const results=[];
+  function recurse(currBoard, cr, cc, capturedSoFar, pathFrom){
+    let foundAny=false;
+    const dirs = getDirections(piece);
+    for(const [dr,dc] of dirs){
+      const mr=cr+dr, mc=cc+dc;
+      const lr=cr+2*dr, lc=cc+2*dc;
+      if(!inBounds(mr,mc)||!inBounds(lr,lc)) continue;
+      const midPiece = currBoard[mr][mc];
+      if(!isOpponent(midPiece, piece.toLowerCase())) continue;
+      if(currBoard[lr][lc] !== null) continue;
+      const nb = cloneBoard(currBoard);
+      nb[cr][cc] = null;
+      nb[mr][mc] = null;
+      nb[lr][lc] = piece;
+      const newCaptured = capturedSoFar.concat([[mr,mc]]);
+      const further = recurse(nb, lr, lc, newCaptured, pathFrom.concat([[lr,lc]]));
+      if(!further.found){
+        const promote = shouldPromote(piece, lr);
+        results.push({ from: pathFrom[0], to: [lr,lc], captures: newCaptured, isJump:true, promote });
+      }
+      foundAny = true;
+    }
+    return { found: foundAny };
+  }
+  recurse(board, r, c, [], [[r,c]]);
+  return results;
+}
+function getAllLegalMoves(board, player){
+  const moves=[]; const jumpMoves=[];
+  for(let r=0;r<BOARD_SIZE;r++){
+    for(let c=0;c<BOARD_SIZE;c++){
+      const piece = board[r][c];
+      if(!isPlayerPiece(piece, player)) continue;
+      const pieceJumps = getJumpsFrom(board, r, c, piece);
+      if(pieceJumps.length) jumpMoves.push(...pieceJumps);
+      else {
+        const pieceSteps = getSimpleMovesFrom(board, r, c, piece);
+        moves.push(...pieceSteps);
+      }
+    }
+  }
+  return jumpMoves.length ? jumpMoves : moves;
+}
+function applyMove(board, move){
+  const nb = cloneBoard(board);
+  const [fr,fc] = move.from;
+  const [tr,tc] = move.to;
+  const piece = nb[fr][fc];
+  if(!piece) throw new Error('No piece at from-square');
+  nb[fr][fc] = null;
+  for(const [cr,cc] of move.captures) nb[cr][cc] = null;
+  let placed = piece;
+  if(move.promote) placed = piece.toUpperCase();
+  nb[tr][tc] = placed;
+  return nb;
+}
+function hasAnyMove(board, player){
+  const moves = getAllLegalMoves(board, player);
+  return moves.length > 0;
+}
+function checkWinner(board, playerToMove){
+  if(!hasAnyMove(board, playerToMove)){
+    return playerToMove === 'b' ? 'w' : 'b';
+  }
+  return null;
+}
+
+// Rooms store
+const rooms = {}; // roomId -> { players: [{socketId, username, color}], board, turn, moveLog, createdAt }
+function makeRoomId(){ return Math.random().toString(36).substring(2,8).toUpperCase(); }
+
+const express = require('express');
+const http = require('http');
+const path = require('path');
+const { Server } = require('socket.io');
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+app.use(express.static(path.join(__dirname,'public')));
+app.get('/', (req,res)=> res.sendFile(path.join(__dirname,'public','index.html')));
+
+// API to list active rooms (client uses this)
+app.get('/api/rooms', (req,res)=>{
+  const list = Object.keys(rooms).map(id => {
+    const r = rooms[id];
+    return { id, players: r.players.length, createdAt: r.createdAt };
+  });
+  res.json(list);
+});
+
+io.on('connection', socket => {
+  console.log('conn', socket.id);
+
+  socket.on('createRoom', ({username}, cb) => {
+    const roomId = makeRoomId();
+    rooms[roomId] = {
+      players: [{ socketId: socket.id, username: username || 'Player', color: 'b'}],
+      board: initBoard(),
+      turn: 'b',
+      moveLog: [],
+      createdAt: Date.now()
+    };
+    socket.join(roomId);
+    cb({ok:true, roomId, color:'b'});
+    io.emit('lobbyUpdate', { rooms: Object.keys(rooms).map(id=>({id, players: rooms[id].players.length})) });
+  });
+
+  socket.on('joinRoom', ({roomId, username}, cb) => {
+    if(!rooms[roomId]) return cb({ok:false, error:'Room not found'});
+    const room = rooms[roomId];
+    if(room.players.length >= 2) return cb({ok:false, error:'Room full'});
+    const color = room.players[0].color === 'b' ? 'w' : 'b';
+    const player = { socketId: socket.id, username: username || 'Player', color };
+    room.players.push(player);
+    socket.join(roomId);
+    cb({ok:true, roomId, color});
+    io.to(roomId).emit('roomUpdate', room);
+    if(room.players.length === 2){
+      io.to(roomId).emit('gameStart', { board: room.board, turn: room.turn, players: room.players });
+    }
+    io.emit('lobbyUpdate', { rooms: Object.keys(rooms).map(id=>({id, players: rooms[id].players.length})) });
+  });
+
+  socket.on('makeMove', ({roomId, move}, cb) => {
+    const room = rooms[roomId];
+    if(!room) return cb({ok:false,error:'Room not found'});
+    const player = room.players.find(p=>p.socketId===socket.id);
+    if(!player) return cb({ok:false,error:'Not in room'});
+    if(player.color !== room.turn) return cb({ok:false,error:'Not your turn'});
+    try {
+      const legal = getAllLegalMoves(room.board, room.turn);
+      const matched = legal.find(m => 
+        m.from[0]===move.from[0] && m.from[1]===move.from[1] &&
+        m.to[0]===move.to[0] && m.to[1]===move.to[1] &&
+        JSON.stringify(m.captures) === JSON.stringify(move.captures)
+      );
+      if(!matched) return cb({ok:false,error:'Illegal move'});
+      room.board = applyMove(room.board, matched);
+      room.moveLog.push({player:player.username, move: matched, ts:Date.now()});
+      let changeTurn = true;
+      if(matched.isJump){
+        const landing = matched.to;
+        const landingPiece = room.board[landing[0]][landing[1]];
+        const further = getJumpsFrom(room.board, landing[0], landing[1], landingPiece);
+        if(further.length) changeTurn = false;
+      }
+      if(changeTurn) room.turn = room.turn === 'b' ? 'w' : 'b';
+      const winner = checkWinner(room.board, room.turn);
+      if(winner){
+        io.to(roomId).emit('gameOver', { winner, room });
+      }
+      io.to(roomId).emit('moveMade', { board: room.board, turn: room.turn, move: matched, players: room.players });
+      cb({ok:true});
+    } catch(err){
+      console.error(err);
+      cb({ok:false,error:err.message});
+    }
+  });
+
+  socket.on('sendChat', ({roomId, text}, cb) => {
+    const room = rooms[roomId];
+    if(!room) return cb({ok:false,error:'Room not found'});
+    const player = room.players.find(p=>p.socketId===socket.id);
+    const msg = { from: player ? player.username : 'Anon', text, ts: Date.now()};
+    io.to(roomId).emit('chat', msg);
+    cb({ok:true});
+  });
+
+  socket.on('leaveRoom', ({roomId})=>{
+    const room = rooms[roomId];
+    if(!room) return;
+    room.players = room.players.filter(p=>p.socketId!==socket.id);
+    socket.leave(roomId);
+    io.emit('lobbyUpdate', { rooms: Object.keys(rooms).map(id=>({id, players: rooms[id].players.length})) });
+    if(room.players.length===0){
+      setTimeout(()=>{ if(rooms[roomId] && rooms[roomId].players.length===0) delete rooms[roomId]; io.emit('lobbyUpdate', { rooms: Object.keys(rooms).map(id=>({id, players: rooms[id].players.length})) }); }, 30000);
+    }
+  });
+
+  socket.on('disconnect', ()=> {
+    Object.keys(rooms).forEach(rid=>{
+      const room = rooms[rid];
+      const idx = room.players.findIndex(p=>p.socketId===socket.id);
+      if(idx!==-1){
+        room.players.splice(idx,1);
+        io.emit('lobbyUpdate', { rooms: Object.keys(rooms).map(id=>({id, players: rooms[id].players.length})) });
+      }
+      if(room.players.length===0) delete rooms[rid];
+    });
+  });
+
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, ()=> console.log('Server listening on', PORT));
